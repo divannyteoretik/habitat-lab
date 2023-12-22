@@ -12,11 +12,7 @@ import numpy as np
 import torch
 from gym import spaces
 from torch import nn as nn
-from torch.nn import functional as F
-from torchvision import transforms as T
-from torchvision.transforms import functional as TF
-
-from habitat import VectorEnv, logger
+from vc_models.models.vit import model_utils
 
 from habitat.tasks.nav.instance_image_nav_task import InstanceImageGoalSensor
 from habitat.tasks.nav.nav import (
@@ -30,20 +26,17 @@ from habitat.tasks.nav.nav import (
 )
 from habitat.tasks.nav.object_nav_task import ObjectGoalSensor
 from habitat_baselines.common.baseline_registry import baseline_registry
-
-import vc_models
-from vc_models.models.vit import model_utils
-
-#from habitat_baselines.rl.ddppo.policy import resnet
-#from habitat_baselines.rl.ddppo.policy.running_mean_and_var import (
-#    RunningMeanAndVar,
-#)
-
 from habitat_baselines.rl.models.rnn_state_encoder import (
     build_rnn_state_encoder,
 )
 from habitat_baselines.rl.ppo import Net, NetPolicy
 from habitat_baselines.utils.common import get_num_actions
+
+# from habitat_baselines.rl.ddppo.policy import resnet
+# from habitat_baselines.rl.ddppo.policy.running_mean_and_var import (
+#    RunningMeanAndVar,
+# )
+
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -184,16 +177,15 @@ class VitEncoder(nn.Module):
             observation_space.spaces[k].shape[2] for k in self.visual_keys
         )
 
-
         if not self.is_blind:
             res = model_utils.load_model(model_utils.VC1_LARGE_NAME)
             model, embd_size, model_transforms, model_info = res
-            #self.model = model.to(self.device)
-            self.model = model.to('cuda')
+            # self.model = model.to(self.device)
+            self.model = model.to("cuda")
             self.embd_size = embd_size
             self.model_transforms = model_transforms
             self.model_info = model_info
-            
+
             self.output_shape = (embd_size,)
 
     @property
@@ -217,7 +209,7 @@ class VitEncoder(nn.Module):
 
         mask = observations.get("ENC_NOCACHE_MASK", None)
         if mask is not None:
-            if len(mask) == 0: # everything is cached
+            if len(mask) == 0:  # everything is cached
                 return None
         else:
             # TODO: get batch_size in a proper way
@@ -225,30 +217,30 @@ class VitEncoder(nn.Module):
             batch_size = first_obs.shape[0]
             mask = [*range(batch_size)]
         cnn_input = []
-        
+
         vis_embeddings = []
-        #print("KEYS:", self.visual_keys)
+        # print("KEYS:", self.visual_keys)
         for k in self.visual_keys:
             obs_k = observations[k]
             obs_k = obs_k[mask]
             # permute tensor to dimension [BATCH x CHANNEL x HEIGHT X WIDTH]
             obs_k = obs_k.permute(0, 3, 1, 2)
-            
-            #if self.key_needs_rescaling[k] is not None:
+
+            # if self.key_needs_rescaling[k] is not None:
             #    obs_k = (
             #        obs_k.float() * self.key_needs_rescaling[k]
             #    )  # normalize
-            #cnn_input.append(obs_k)
-            
-            #print(obs_k)
+            # cnn_input.append(obs_k)
+
+            # print(obs_k)
             x = obs_k.float()
             n_ch = x.shape[1]
             # I don't know what to do with depth
             # let's simply treat it as a usual image
             if n_ch == 1:
                 continue
-                #x = torch.cat([x,x,x], dim=1)
-                
+                # x = torch.cat([x,x,x], dim=1)
+
             x = self.model_transforms(x)
             x = self.model(x)
             vis_embeddings.append(x)
@@ -256,13 +248,14 @@ class VitEncoder(nn.Module):
         x = torch.cat(vis_embeddings, dim=1)
         print("concat embeddings:", x.shape)
         # x = torch.cat(cnn_input, dim=1)
-        #print(x.shape)
-        # it will resize images to 244x244, 
+        # print(x.shape)
+        # it will resize images to 244x244,
         # we don't need to scale them twice
-        #x = F.avg_pool2d(x, 2) 
-        #x = self.model_transforms(x)
-        #x = self.model(x)
+        # x = F.avg_pool2d(x, 2)
+        # x = self.model_transforms(x)
+        # x = self.model(x)
         return x
+
 
 # TODO: should we use clip with vit?
 
@@ -480,15 +473,13 @@ class PointNavVitNet(Net):
         masks,
         rnn_build_seq_info: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-        print("FORWARD IN VIT")
         x = []
         aux_loss_state = {}
         if not self.is_blind:
             # We CANNOT use observations.get() here because self.visual_encoder(observations)
             # is an expensive operation. Therefore, we need `# noqa: SIM401`
             if (  # noqa: SIM401
-                PointNavVitNet.PRETRAINED_VISUAL_FEATURES_KEY
-                in observations
+                PointNavVitNet.PRETRAINED_VISUAL_FEATURES_KEY in observations
             ):
                 visual_feats = observations[
                     PointNavVitNet.PRETRAINED_VISUAL_FEATURES_KEY
@@ -586,16 +577,14 @@ class PointNavVitNet(Net):
             ImageGoalSensor.cls_uuid,
             InstanceImageGoalSensor.cls_uuid,
         ]:
-            #print("HELLO", uuid, ImageGoalSensor.cls_uuid, InstanceImageGoalSensor.cls_uuid)
             if uuid in observations:
-                #print("IT's HERE")
                 goal_image = observations[uuid]
 
                 goal_visual_encoder = getattr(self, f"{uuid}_encoder")
                 goal_visual_output = goal_visual_encoder({"rgb": goal_image})
 
                 x.append(goal_visual_output)
-                
+
                 goal_visual_fc = getattr(self, f"{uuid}_fc")
                 x.append(goal_visual_fc(goal_visual_output))
 

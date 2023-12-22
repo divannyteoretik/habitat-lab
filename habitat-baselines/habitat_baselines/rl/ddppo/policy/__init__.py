@@ -8,3 +8,4 @@ from .resnet_policy import (  # noqa: F401.
     PointNavResNetNet,
     PointNavResNetPolicy,
 )
+from .vit_policy import PointNavVitNet, PointNavVitPolicy

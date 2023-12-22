@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set
 import hydra
 import numpy as np
 import torch
+import xxhash
 from omegaconf import OmegaConf
 
 import habitat_baselines.rl.multi_agent  # noqa: F401.
@@ -93,6 +94,9 @@ class PPOTrainer(BaseRLTrainer):
         # Distributed if the world size would be
         # greater than 1
         self._is_distributed = get_distrib_size()[2] > 1
+        self.enc_cache_dict = {}
+        self.enc_cached = 0
+        self.enc_noncached = 0
 
     def _all_reduce(self, t: torch.Tensor) -> torch.Tensor:
         r"""All reduce helper method that moves things to the correct
@@ -255,7 +259,7 @@ class PPOTrainer(BaseRLTrainer):
 
         self._agent = self._create_agent(resume_state)
         if self._is_distributed:
-            self._agent.init_distributed(find_unused_params=False)  # type: ignore
+            self._agent.updater.init_distributed(find_unused_params=False)  # type: ignore
         self._agent.post_init()
 
         self._is_static_encoder = (
@@ -417,6 +421,7 @@ class PPOTrainer(BaseRLTrainer):
 
         with g_timer.avg_time("trainer.update_stats"):
             observations = self.envs.post_step(observations)
+            # print(observations)
             batch = batch_obs(observations, device=self.device)
             batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
 
@@ -466,9 +471,61 @@ class PPOTrainer(BaseRLTrainer):
 
         if self._is_static_encoder:
             with inference_mode(), g_timer.avg_time("trainer.visual_features"):
+                cached_idxs = []
+                noncached_idxs = []
+
+                cached_results = []
+                im_hash_arr = []
+
+                with g_timer.avg_time("trainer.visual_features_cache"):
+                    im_observations = [
+                        *map(lambda x: x["rgb"][:, :, 0], observations)
+                    ]
+
+                    for i, im_numpy in enumerate(im_observations):
+                        im_hash = xxhash.xxh128(im_numpy.tobytes()).digest()
+
+                        if im_hash in self.enc_cache_dict:
+                            cached_idxs.append(i)
+                            self.enc_cached += 1
+                            cached_results.append(self.enc_cache_dict[im_hash])
+                        else:
+                            im_hash_arr.append(im_hash)
+                            noncached_idxs.append(i)
+                            self.enc_noncached += 1
+
+                if self.enc_cached > 0:
+                    ratio = self.enc_cached / (
+                        self.enc_noncached + self.enc_cached
+                    )
+                    logger.debug(
+                        f"cached: {self.enc_cached}; noncached: {self.enc_noncached}; ratio: {ratio}"
+                    )
+
+                batch["ENC_NOCACHE_MASK"] = noncached_idxs
+
+                with g_timer.avg_time("trainer.visual_features_inference"):
+                    enc_batch = self._encoder(batch)
+
+                with g_timer.avg_time("trainer.visual_features_hashing"):
+                    for i, im_hash in enumerate(im_hash_arr):
+                        im_enc = enc_batch[i].cpu()
+                        self.enc_cache_dict[im_hash] = im_enc
+
+                res_batch_shape = (
+                    len(observations),
+                ) + self._encoder.output_shape
+                res_batch = torch.zeros(res_batch_shape, device=self.device)
+                if len(cached_idxs) > 0:
+                    res_batch[cached_idxs] = torch.stack(cached_results).to(
+                        self.device
+                    )
+                if len(noncached_idxs) > 0:
+                    res_batch[noncached_idxs] = enc_batch
+
                 batch[
                     PointNavResNetNet.PRETRAINED_VISUAL_FEATURES_KEY
-                ] = self._encoder(batch)
+                ] = res_batch
 
         self._agent.rollouts.insert(
             next_observations=batch,

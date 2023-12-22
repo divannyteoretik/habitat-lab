@@ -16,6 +16,8 @@ from habitat_baselines.common.storage import Storage
 from habitat_baselines.rl.ddppo.policy import (  # noqa: F401.
     PointNavResNetNet,
     PointNavResNetPolicy,
+    PointNavVitNet,
+    PointNavVitPolicy,
 )
 from habitat_baselines.rl.hrl.hierarchical_policy import (  # noqa: F401.
     HierarchicalPolicy,
@@ -184,6 +186,10 @@ class SingleAgentAccessMgr(AgentAccessMgr):
         Creates and initializes the policy. This should also load any model weights from checkpoints.
         """
 
+        print(
+            "POLICY NAME:",
+            self._config.habitat_baselines.rl.policy[self.agent_name].name,
+        )
         policy = baseline_registry.get_policy(
             self._config.habitat_baselines.rl.policy[self.agent_name].name
         )
@@ -216,13 +222,17 @@ class SingleAgentAccessMgr(AgentAccessMgr):
             )
         elif self._config.habitat_baselines.rl.ddppo.pretrained_encoder:
             prefix = "actor_critic.net.visual_encoder."
-            actor_critic.net.visual_encoder.load_state_dict(
-                {
-                    k[len(prefix) :]: v
-                    for k, v in pretrained_state["state_dict"].items()
-                    if k.startswith(prefix)
-                }
-            )
+            try:
+                actor_critic.net.visual_encoder.load_state_dict(
+                    {
+                        k[len(prefix) :]: v
+                        for k, v in pretrained_state["state_dict"].items()
+                        if k.startswith(prefix)
+                    }
+                )
+            except RuntimeError as e:
+                print('Ignoring "' + str(e) + '"')
+
         if self._is_static_encoder:
             for param in actor_critic.visual_encoder.parameters():
                 param.requires_grad_(False)
@@ -272,7 +282,11 @@ class SingleAgentAccessMgr(AgentAccessMgr):
         self._actor_critic.load_state_dict(ckpt["state_dict"])
 
     def load_state_dict(self, state: Dict) -> None:
-        self._actor_critic.load_state_dict(state["state_dict"])
+        try:
+            self._actor_critic.load_state_dict(state["state_dict"])
+        except RuntimeError as e:
+            print('Ignoring "' + str(e) + '"')
+
         if self._updater is not None:
             self._updater.load_state_dict(state)
             if "lr_sched_state" in state:

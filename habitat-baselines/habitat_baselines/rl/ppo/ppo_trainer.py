@@ -512,6 +512,9 @@ class PPOTrainer(BaseRLTrainer):
                         im_enc = enc_batch[i].cpu()
                         self.enc_cache_dict[im_hash] = im_enc
 
+                # It doesn't work. Why?
+                # self._agent.actor_critic.enc_cache_dict = self.enc_cache_dict
+
                 res_batch_shape = (
                     len(observations),
                 ) + self._encoder.output_shape
@@ -535,7 +538,6 @@ class PPOTrainer(BaseRLTrainer):
         )
 
         self._agent.rollouts.advance_rollout(buffer_index)
-
         return env_slice.stop - env_slice.start
 
     @profiling_wrapper.RangeContext("_collect_rollout_step")

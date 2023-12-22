@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import xxhash
 from gym import spaces
 from torch import nn as nn
 from torch.nn import functional as F
@@ -172,7 +173,7 @@ class ResNetEncoder(nn.Module):
         normalize_visual_inputs: bool = False,
     ):
         super().__init__()
-
+        self.enc_cache_dict = None
         # Determine which visual observations are present
         self.visual_keys = [
             k
@@ -282,7 +283,6 @@ class ResNetEncoder(nn.Module):
         x = self.running_mean_and_var(x)
         x = self.backbone(x)
         x = self.compression(x)
-
         return x
 
 
@@ -424,6 +424,11 @@ class PointNavResNetNet(Net):
         discrete_actions: bool = True,
     ):
         super().__init__()
+
+        self.enc_cache_dict = {}
+        self.enc_cached = 0
+        self.enc_noncached = 0
+
         self.prev_action_embedding: nn.Module
         self.discrete_actions = discrete_actions
         self._n_prev_action = 32
@@ -747,19 +752,61 @@ class PointNavResNetNet(Net):
         ]:
             if uuid in observations:
                 goal_image = observations[uuid]
+
                 goal_image_emb = getattr(self, f"{uuid}_emb")
                 # TODO: get batch size in a proper way
                 batch_size = x[0].shape[0]
-                if goal_image_emb is None:
-                    goal_visual_encoder = getattr(self, f"{uuid}_encoder")
-                    goal_visual_output = goal_visual_encoder(
-                        {"rgb": goal_image}
+
+                cached_idxs = []
+                noncached_idxs = []
+                cached_results = []
+                im_hash_arr = []
+
+                # TODO:
+                # 0. Remove old cached results? 10k hashes take ~1Mb
+                # 1. Unite cached results with results of ppo_trainer?
+                # 2. Re-write duplicated hash-related code
+                # 3. Verify that hashing is correct: there are
+                #    rgb and depth inputs, I hash only rgb.
+                #    Are there cases when both  {'rgb':...} and
+                #    {'rgb':..., 'depth':...} inputs exist? If so,
+                #    they must have different hashes
+
+                for i, im in enumerate(goal_image):
+                    im_numpy = im.cpu().numpy()
+                    im_hash = xxhash.xxh128(im_numpy.tobytes()).digest()
+
+                    if im_hash in self.enc_cache_dict:
+                        cached_idxs.append(i)
+                        self.enc_cached += 1
+                        cached_results.append(self.enc_cache_dict[im_hash])
+                    else:
+                        im_hash_arr.append(im_hash)
+                        noncached_idxs.append(i)
+                        self.enc_noncached += 1
+
+                goal_visual_encoder = getattr(self, f"{uuid}_encoder")
+                goal_visual_output = goal_visual_encoder(
+                    {"rgb": goal_image, "ENC_NOCACHE_MASK": noncached_idxs}
+                )
+
+                res_batch_shape = (batch_size, 512)
+                res_batch = torch.zeros(res_batch_shape, device="cuda")
+                if len(cached_idxs) > 0:
+                    res_batch[cached_idxs] = torch.stack(cached_results).to(
+                        "cuda"
                     )
+                if len(noncached_idxs) > 0:
                     goal_visual_fc = getattr(self, f"{uuid}_fc")
                     goal_image_emb = goal_visual_fc(goal_visual_output)
-                    setattr(self, f"{uuid}_emb", goal_image_emb)
+                    res_batch[noncached_idxs] = goal_image_emb
 
-                goal_image_emb = goal_image_emb.repeat(batch_size, 1)
+                for i, im_hash in enumerate(im_hash_arr):
+                    im_enc = goal_image_emb[i].cpu()
+                    self.enc_cache_dict[im_hash] = im_enc
+
+                goal_image_emb = res_batch
+                setattr(self, f"{uuid}_emb", goal_image_emb)
                 x.append(goal_image_emb)
 
         if self.discrete_actions:
@@ -781,5 +828,4 @@ class PointNavResNetNet(Net):
             out, rnn_hidden_states, masks, rnn_build_seq_info
         )
         aux_loss_state["rnn_output"] = out
-
         return out, rnn_hidden_states, aux_loss_state
